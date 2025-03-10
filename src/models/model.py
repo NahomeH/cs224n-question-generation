@@ -9,6 +9,9 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from typing import Dict, Any, Optional, List, Union
 import logging
+import os
+import hashlib
+from pathlib import Path
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -24,7 +27,9 @@ class MedicalQuestionGenerator:
         model_name: str = "BioMistral/BioMistral-7B", 
         load_in_4bit: bool = True,
         load_in_8bit: bool = False,
-        device: Optional[str] = None
+        device: Optional[str] = None,
+        use_cache: bool = True,
+        cache_dir: Optional[str] = None
     ):
         """
         Initialize the medical question generator.
@@ -34,10 +39,16 @@ class MedicalQuestionGenerator:
             load_in_4bit: Whether to load model in 4-bit precision (saves the most memory)
             load_in_8bit: Whether to load model in 8-bit precision (better quality than 4-bit)
             device: Device to load the model on (default: auto-detect)
+            use_cache: Whether to use model caching
+            cache_dir: Directory to store cached models (default: ./model_cache)
         """
         # Device selection
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Using device: {self.device}")
+        
+        # Caching settings
+        self.use_cache = use_cache
+        self.cache_dir = cache_dir or os.path.join(os.getcwd(), "model_cache")
         
         # Tokenizer loading
         logger.info(f"Loading tokenizer for {model_name}...")
@@ -52,8 +63,33 @@ class MedicalQuestionGenerator:
         logger.info("Loading model...")
         self._load_model(model_name, load_in_4bit, load_in_8bit)
         
+    def _get_cache_path(self, model_name, load_in_4bit, load_in_8bit):
+        """Generate a unique cache path based on model configuration"""
+        # Create a unique identifier based on model settings
+        config_string = f"{model_name}_{load_in_4bit}_{load_in_8bit}_{self.device}"
+        config_hash = hashlib.md5(config_string.encode()).hexdigest()[:10]
+        
+        # Create a safe filename
+        safe_model_name = model_name.replace('/', '_')
+        cache_path = os.path.join(self.cache_dir, f"{safe_model_name}_{config_hash}.pt")
+        
+        return cache_path
+    
     def _load_model(self, model_name, load_in_4bit, load_in_8bit):
         """Helper method to load the model with appropriate quantization"""
+        # Check for cached model if caching is enabled
+        cache_path = None
+        if self.use_cache:
+            cache_path = self._get_cache_path(model_name, load_in_4bit, load_in_8bit)
+            if os.path.exists(cache_path):
+                try:
+                    logger.info(f"Loading model from cache: {cache_path}")
+                    self.model = torch.load(cache_path, map_location=self.device)
+                    logger.info("Model loaded from cache successfully")
+                    return
+                except Exception as e:
+                    logger.warning(f"Failed to load cached model: {e}. Will load from scratch.")
+        
         try:
             # GPU path with quantization options
             if self.device == "cuda":
@@ -104,6 +140,16 @@ class MedicalQuestionGenerator:
                 )
                 
             logger.info("Model loaded successfully")
+            
+            # Cache the loaded model if caching is enabled
+            if self.use_cache and cache_path:
+                try:
+                    logger.info(f"Caching model to: {cache_path}")
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    torch.save(self.model, cache_path)
+                    logger.info("Model cached successfully")
+                except Exception as e:
+                    logger.warning(f"Failed to cache model: {e}")
                 
         except Exception as e:
             logger.error(f"Error loading model: {e}")
@@ -117,26 +163,70 @@ class MedicalQuestionGenerator:
                     low_cpu_mem_usage=True
                 )
                 logger.info("Model loaded with fallback method")
+                
+                # Cache the fallback loaded model if caching is enabled
+                if self.use_cache and cache_path:
+                    try:
+                        logger.info(f"Caching fallback model to: {cache_path}")
+                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                        torch.save(self.model, cache_path)
+                        logger.info("Fallback model cached successfully")
+                    except Exception as cache_error:
+                        logger.warning(f"Failed to cache fallback model: {cache_error}")
+                        
             except Exception as fallback_error:
                 logger.error(f"Fallback loading also failed: {fallback_error}")
                 raise RuntimeError(f"Could not load model {model_name}. Check your environment and dependencies.")
+
+    def get_quest_generator(self):
+        """
+        Create and return a QuestGenerator instance using this model.
+        
+        Returns:
+            QuestGenerator instance configured with this model
+        """
+        from src.models.quest_generator import QuestAiGenerator
+        return QuestAiGenerator(self.model, self.tokenizer, self.device)
             
 def test_cpu_model_loading():
     """Simple test to verify model loads on CPU."""
     print("Testing model loading on CPU...")
     
     try:
-        # Initialize with CPU device explicitly
-        generator = MedicalQuestionGenerator(device="cpu")
+        # First run - will create cache
+        print("First run - should load model from scratch and cache it")
+        generator1 = MedicalQuestionGenerator(
+            device="cpu", 
+            use_cache=True,
+            cache_dir="./test_model_cache"
+        )
         
         # Check basic properties
         print("✓ Model loaded successfully")
-        print(f"✓ Model type: {type(generator.model).__name__}")
+        print(f"✓ Model type: {type(generator1.model).__name__}")
         
         # Verify it's actually on CPU
-        device = next(generator.model.parameters()).device
+        device = next(generator1.model.parameters()).device
         print(f"✓ Model is on: {device}")
         
+        # Second run - should use cache
+        print("\nSecond run - should load model from cache")
+        generator2 = MedicalQuestionGenerator(
+            device="cpu", 
+            use_cache=True,
+            cache_dir="./test_model_cache"
+        )
+        
+        print("✓ Second model loaded")
+        
+        # Test disabling cache
+        print("\nThird run - with caching disabled")
+        generator3 = MedicalQuestionGenerator(
+            device="cpu", 
+            use_cache=False
+        )
+        
+        print("✓ Third model loaded without cache")
         print("CPU loading test PASSED")
         return True
         
@@ -145,4 +235,5 @@ def test_cpu_model_loading():
         return False
 
 if __name__ == "__main__":
+    # Uncomment to test model loading and caching
     test_cpu_model_loading()

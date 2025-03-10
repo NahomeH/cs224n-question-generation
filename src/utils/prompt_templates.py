@@ -1,132 +1,97 @@
 """
 Prompt templates for medical question generation.
 
-This module provides standardized prompt templates for fine-tuning
-and inference with the BioMistral model.
+This module provides standardized prompt templates
+to generate USMLE-style questions.
 """
 
 from typing import Dict, Any, Optional
 from string import Template
 
+# Template for explanation generation step in QUEST-AI approach
+BIOMISTRAL_EXPLANATION_TEMPLATE = """<s>[INST] 
+Here is an example question from the USMLE $step_level:
 
-# Base template for USMLE question generation with BioMistral
-BIOMISTRAL_GENERATION_TEMPLATE = """<s>[INST] Generate a detailed USMLE-style medical question based on this clinical case. 
-The question should test understanding of key clinical findings and diagnosis.
+$question_text
 
-Clinical Case:
-$clinical_case
+Answer Choices:
+$options_text
 
-Create a single, well-formulated USMLE-style question with a clear focus on the key medical concepts. [/INST]"""
+Why is ($correct_letter) "$correct_option" the correct answer and why are the other answers incorrect? Provide a detailed explanation. [/INST]"""
 
-# Template for fine-tuning with explicit instructions
-BIOMISTRAL_TRAINING_TEMPLATE = """<s>[INST] Generate a detailed USMLE-style medical question based on this clinical case. 
-The question should test understanding of key clinical findings and diagnosis.
+# Template for question generation using example and explanation
+BIOMISTRAL_QUEST_CHAIN_TEMPLATE = """<s>[INST] 
+Here is an example question, answer, and explanation from the USMLE $step_level:
 
-Clinical Case:
-$clinical_case
+Sample Question:
+$question_text
 
-Create a single, well-formulated USMLE-style question with a clear focus on the key medical concepts. [/INST]
+Answer Choices:
+$options_text
 
-$question"""
+The correct answer is $correct_letter.
 
-# Template for generating multiple-choice questions
-BIOMISTRAL_MCQ_TEMPLATE = """<s>[INST] Generate a detailed USMLE-style multiple-choice question based on this clinical case. 
-The question should test understanding of key clinical findings and diagnosis.
+Answer & Explanation:
+$explanation
 
-Clinical Case:
-$clinical_case
-
-Create a well-formulated USMLE-style multiple-choice question with 5 answer options (A-E),
-clearly marking the correct answer, and providing a brief explanation for the correct answer. [/INST]"""
-
-# Template for generating questions with specific difficulty
-BIOMISTRAL_DIFFICULTY_TEMPLATE = """<s>[INST] Generate a $difficulty USMLE-style medical question based on this clinical case. 
-The question should test understanding of key clinical findings and diagnosis.
-
-Clinical Case:
-$clinical_case
-
-Create a single, well-formulated USMLE-style question with a clear focus on the key medical concepts.
-Make sure the question is $difficulty level, suitable for $audience. [/INST]"""
+Generate another question for the USMLE $step_level using a similar format. 
+The new question should:
+1. Include a detailed clinical vignette
+2. Test understanding of key clinical findings and appropriate management
+3. Include 5-6 answer choices labeled A through F
+4. Clearly indicate which answer is correct
+[/INST]"""
 
 
-def format_generation_prompt(clinical_case: str) -> str:
+def format_explanation_prompt(question_text: str, options: dict, correct_letter: str, step_level: str = "Step 2 CK") -> str:
     """
-    Format the standard generation prompt.
+    Format prompt for the explanation generation step.
     
     Args:
-        clinical_case: Clinical case description
+        question_text: Text of the example question
+        options: Dictionary of options (letter -> text)
+        correct_letter: The letter of the correct answer
+        step_level: USMLE step level (e.g., "Step 1", "Step 2 CK", "Step 3")
         
     Returns:
-        Formatted prompt
+        Formatted explanation prompt
     """
-    return Template(BIOMISTRAL_GENERATION_TEMPLATE).substitute(
-        clinical_case=clinical_case
+    options_text = "\n".join([f"{letter}. {text}" for letter, text in options.items()])
+    correct_option = options[correct_letter]
+    
+    return Template(BIOMISTRAL_EXPLANATION_TEMPLATE).substitute(
+        question_text=question_text,
+        options_text=options_text,
+        correct_letter=correct_letter,
+        correct_option=correct_option,
+        step_level=step_level
     )
 
 
-def format_training_prompt(clinical_case: str, question: str) -> str:
+def format_quest_chain_prompt(question_text: str, options: dict, correct_letter: str, explanation: str, step_level: str = "Step 2 CK") -> str:
     """
-    Format the training prompt with example completion.
+    Format prompt for the question generation step using explanation.
     
     Args:
-        clinical_case: Clinical case description
-        question: Target question to generate
+        question_text: Text of the example question
+        options: Dictionary of options (letter -> text)
+        correct_letter: The letter of the correct answer
+        explanation: Generated explanation of the correct answer
+        step_level: USMLE step level (e.g., "Step 1", "Step 2 CK", "Step 3")
         
     Returns:
-        Formatted prompt with completion
+        Formatted prompt for generating a new question
     """
-    return Template(BIOMISTRAL_TRAINING_TEMPLATE).substitute(
-        clinical_case=clinical_case,
-        question=question
+    options_text = "\n".join([f"{letter}. {text}" for letter, text in options.items()])
+    
+    return Template(BIOMISTRAL_QUEST_CHAIN_TEMPLATE).substitute(
+        question_text=question_text,
+        options_text=options_text,
+        correct_letter=correct_letter,
+        explanation=explanation,
+        step_level=step_level
     )
 
 
-def format_mcq_prompt(clinical_case: str) -> str:
-    """
-    Format prompt for multiple-choice question generation.
-    
-    Args:
-        clinical_case: Clinical case description
-        
-    Returns:
-        Formatted MCQ prompt
-    """
-    return Template(BIOMISTRAL_MCQ_TEMPLATE).substitute(
-        clinical_case=clinical_case
-    )
-
-
-def format_difficulty_prompt(
-    clinical_case: str, 
-    difficulty: str = "medium",
-    audience: str = "medical students in clinical rotations"
-) -> str:
-    """
-    Format prompt for generating questions with specific difficulty.
-    
-    Args:
-        clinical_case: Clinical case description
-        difficulty: Difficulty level ("easy", "medium", "hard")
-        audience: Target audience for the question
-        
-    Returns:
-        Formatted prompt with difficulty specification
-    """
-    return Template(BIOMISTRAL_DIFFICULTY_TEMPLATE).substitute(
-        clinical_case=clinical_case,
-        difficulty=difficulty,
-        audience=audience
-    )
-
-
-# Example usage
-if __name__ == "__main__":
-    case = """A 45-year-old female presents with sudden onset chest pain radiating to the left arm. 
-    She reports shortness of breath and nausea. Patient has a history of hypertension 
-    and Type 2 diabetes. Vital signs show BP 160/95, HR 98, RR 22."""
-    
-    print("Generation Prompt Example:")
-    print("-" * 80)
-    print(format_generation_prompt(case))
-    print("-" * 80) 
+# NOTE: Other templates and formatting functions are to be implemented in the future
+# as additional question generation approaches are needed.
