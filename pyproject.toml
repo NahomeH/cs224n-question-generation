@@ -1,17 +1,41 @@
 [tool.poetry]
 name = "medical-qa-gen"
 version = "0.1.0"
-description = "Medical question generation using Flan-T5"
+description = "Fine-tuning BioMistral for USMLE question generation"
 authors = ["nahomeh1 <86496110+nahomeh1@users.noreply.github.com>"]
-package-mode = false
+readme = "README.md"
+packages = [{include = "src"}]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<4.0"
 torch = ">=2.0.1,<3.0.0"
-transformers = ">=4.36.2,<5.0.0"
+transformers = ">=4.38.0,<5.0.0"
 datasets = ">=2.15.0,<3.0.0"
 tqdm = ">=4.65.0,<5.0.0"
 accelerate = ">=0.25.0,<1.0.0"
+sentencepiece = ">=0.1.99"
+bitsandbytes = "0.41.1"
+peft = ">=0.5.0,<1.0.0"
+einops = ">=0.6.1,<1.0.0"
+wandb = ">=0.15.0,<1.0.0"
+pydantic = ">=2.0.0,<3.0.0"
+rouge-score = ">=0.1.2,<1.0.0"
+nltk = ">=3.8.1,<4.0.0"
+bert-score = ">=0.3.13,<1.0.0"
+pandas = ">=2.0.0,<3.0.0"
+huggingface-hub = ">=0.16.0,<1.0.0"
+onnx = ">=1.14.0,<2.0.0"
+onnxruntime = ">=1.15.0,<2.0.0"
+scikit-learn = ">=1.3.0,<2.0.0"
+tensorboard = ">=2.13.0,<3.0.0"
+optimum = ">=1.12.0,<2.0.0"
+jupyter = ">=1.0.0,<2.0.0"
+
+[tool.poetry.scripts]
+generate = "src.generate_question:main"
+finetune = "src.fine_tune:main"
+download-data = "scripts.download_datasets:main"
+export-model = "scripts.export_model:main"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
