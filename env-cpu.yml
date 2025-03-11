@@ -1,14 +1,12 @@
-name: cs224n-gpu
+name: usmle-cpu
 channels:
   - defaults
-  - nvidia
   - pytorch
 dependencies:
   - python==3.10
-  - nvidia::cuda-toolkit==12.1.1
-  - pip
   - pytorch::pytorch=2.0.1
   - pytorch::torchvision
   - pytorch::torchaudio
+  - pip
   - pip:
     - -r requirements.txt
