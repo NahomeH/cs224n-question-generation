@@ -183,8 +183,8 @@ class MedicalQuestionGenerator:
         Returns:
             QuestGenerator instance configured with this model
         """
-        from src.models.quest_generator import QuestAiGenerator
-        return QuestAiGenerator(self.model, self.tokenizer, self.device)
+        from src.models.quest_generator import QuestionGenerator
+        return QuestionGenerator(self.model, self.tokenizer, self.device)
             
 def test_cpu_model_loading():
     """Simple test to verify model loads on CPU."""

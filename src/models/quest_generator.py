@@ -4,7 +4,7 @@ Simple USMLE question generator.
 
 import torch
 
-class SimpleQuestionGenerator:
+class QuestionGenerator:
     """
     A simplified generator for USMLE-style medical questions.
     """
