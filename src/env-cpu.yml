@@ -1,0 +1,12 @@
+name: usmle-cpu
+channels:
+  - defaults
+  - pytorch
+dependencies:
+  - python==3.10
+  - pytorch::pytorch=2.0.1
+  - pytorch::torchvision
+  - pytorch::torchaudio
+  - pip
+  - pip:
+    - -r requirements.txt
