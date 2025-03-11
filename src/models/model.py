@@ -90,81 +90,77 @@ class MedicalQuestionGenerator:
                 except Exception as e:
                     logger.warning(f"Failed to load cached model: {e}. Will load from scratch.")
         
+        # Create offload folder for disk offloading if needed
+        offload_folder = os.path.join(self.cache_dir, "offload")
+        os.makedirs(offload_folder, exist_ok=True)
+        
         try:
-            # GPU path with quantization options
+            # GPU path (CUDA)
             if self.device == "cuda":
+                logger.info("Loading model on GPU...")
+                
+                # T4 GPU optimized loading
                 if load_in_8bit:
-                    logger.info("Loading model in 8-bit precision on GPU (optimal for T4)...")
                     try:
+                        logger.info("Attempting 8-bit quantization (good for T4 GPUs)...")
                         import bitsandbytes as bnb
                         self.model = AutoModelForCausalLM.from_pretrained(
                             model_name,
                             load_in_8bit=True,
                             device_map="auto",
-                            torch_dtype=torch.float16  # Add explicit torch dtype for better T4 compatibility
+                            offload_folder=offload_folder,
+                            torch_dtype=torch.float16
                         )
-                    except ImportError:
-                        logger.warning("bitsandbytes not available for 8-bit quantization. Falling back...")
-                        raise ImportError("bitsandbytes required for 8-bit quantization")
+                        logger.info("Model loaded with 8-bit quantization successfully")
+                    except (ImportError, ValueError) as e:
+                        logger.warning(f"8-bit quantization failed: {e}")
+                        load_in_8bit = False
+                        # Fall through to standard loading
                     except Exception as e:
-                        logger.warning(f"8-bit loading failed: {e}")
-                        logger.info("Falling back to standard loading...")
-                        
-                        self.model = AutoModelForCausalLM.from_pretrained(
-                            model_name,
-                            torch_dtype=torch.float16,
-                            device_map="auto"
-                        )
-                        logger.info("Model loaded with standard quantization")
-                        
-                elif load_in_4bit:
-                    logger.info("Loading model in 4-bit precision on GPU...")
+                        logger.warning(f"8-bit loading failed with unexpected error: {e}")
+                        load_in_8bit = False
+                        # Fall through to standard loading
+                
+                # 4-bit quantization attempt
+                if load_in_4bit and not load_in_8bit:
                     try:
+                        logger.info("Attempting 4-bit quantization...")
                         import bitsandbytes as bnb
                         self.model = AutoModelForCausalLM.from_pretrained(
                             model_name,
                             load_in_4bit=True,
                             device_map="auto",
-                            quantization_config={
-                                "load_in_4bit": True, 
-                                "bnb_4bit_compute_dtype": torch.float16,
-                                "bnb_4bit_use_double_quant": True
-                            }
+                            offload_folder=offload_folder,
+                            torch_dtype=torch.float16
                         )
-                    except ImportError:
-                        logger.warning("bitsandbytes not available for 4-bit quantization. Falling back...")
-                        raise ImportError("bitsandbytes required for 4-bit quantization")
+                        logger.info("Model loaded with 4-bit quantization successfully")
+                    except (ImportError, ValueError) as e:
+                        logger.warning(f"4-bit quantization failed: {e}")
+                        # Fall through to standard loading
                     except Exception as e:
-                        logger.warning(f"4-bit loading failed: {e}")
-                        logger.info("Falling back to standard loading...")
-                        
-                        self.model = AutoModelForCausalLM.from_pretrained(
-                            model_name,
-                            torch_dtype=torch.float16,
-                            device_map="auto"
-                        )
-                        logger.info("Model loaded with standard quantization")
-                        
-                else:
-                    logger.info("Loading model in full precision on GPU...")
+                        logger.warning(f"4-bit loading failed with unexpected error: {e}")
+                        # Fall through to standard loading
+                
+                # Standard loading (fallback that always works)
+                if not hasattr(self, 'model') or self.model is None:
+                    logger.info("Using standard float16 loading (most compatible)...")
                     self.model = AutoModelForCausalLM.from_pretrained(
-                        model_name, 
-                        torch_dtype=torch.float16,
-                        device_map="auto"
+                        model_name,
+                        device_map="auto",
+                        offload_folder=offload_folder,
+                        torch_dtype=torch.float16
                     )
-                    self.model.to(self.device)
+                    logger.info("Model loaded with standard precision")
                     
-            # CPU path (quantization options limited)
+            # CPU path
             else:
                 logger.info("Loading model on CPU. This may use significant RAM...")
-                # For CPU, we should optimize for memory usage
                 self.model = AutoModelForCausalLM.from_pretrained(
                     model_name,
                     device_map={"": self.device},
-                    low_cpu_mem_usage=True,
+                    low_cpu_mem_usage=True
                 )
-                
-            logger.info("Model loaded successfully")
+                logger.info("Model loaded on CPU successfully")
             
             # Cache the loaded model if caching is enabled
             if self.use_cache and cache_path:
@@ -178,30 +174,7 @@ class MedicalQuestionGenerator:
                 
         except Exception as e:
             logger.error(f"Error loading model: {e}")
-            logger.info("Attempting fallback loading method...")
-            
-            try:
-                # Fallback to the most compatible loading method
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    model_name, 
-                    device_map="auto",
-                    low_cpu_mem_usage=True
-                )
-                logger.info("Model loaded with fallback method")
-                
-                # Cache the fallback loaded model if caching is enabled
-                if self.use_cache and cache_path:
-                    try:
-                        logger.info(f"Caching fallback model to: {cache_path}")
-                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                        torch.save(self.model, cache_path)
-                        logger.info("Fallback model cached successfully")
-                    except Exception as cache_error:
-                        logger.warning(f"Failed to cache fallback model: {cache_error}")
-                        
-            except Exception as fallback_error:
-                logger.error(f"Fallback loading also failed: {fallback_error}")
-                raise RuntimeError(f"Could not load model {model_name}. Check your environment and dependencies.")
+            raise RuntimeError(f"Could not load model {model_name}. See error above.")
 
     def get_quest_generator(self):
         """

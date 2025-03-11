@@ -38,7 +38,6 @@ def main():
         temperature=0.7,
         explanation_temp=0.6,
         max_new_tokens=1024,
-        step_level="Step 2 CK"
     )
     
     # Print the result
