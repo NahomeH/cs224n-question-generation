@@ -52,7 +52,7 @@ class QuestAiGenerator:
             step_level: USMLE step level (e.g., "Step 1", "Step 2 CK", "Step 3")
             
         Returns:
-            Dict containing the generated question, options, and answer
+            Dict containing the raw generated explanation and question
         """
         from src.utils.prompt_templates import format_explanation_prompt, format_quest_chain_prompt
         
@@ -61,6 +61,7 @@ class QuestAiGenerator:
         correct_letter = example_question['answer']
         options = example_question['options']
         step_level = example_question['meta_info']
+        print(f"Example question: {example_question}")
         
         # STEP 1: Generate explanation of why the answer is correct
         logger.info("Generating explanation for the example question")
@@ -70,12 +71,16 @@ class QuestAiGenerator:
             correct_letter=correct_letter,
             step_level=step_level
         )
+        logger.info(f"Explanation prompt: {explanation_prompt}")
         
         explanation = self._generate_text(
             prompt=explanation_prompt,
             temperature=explanation_temp,
             max_new_tokens=max_new_tokens
         )
+        
+        # Log the explanation
+        logger.info(f"Generated explanation: {explanation}")
         
         # STEP 2: Generate new question using the explanation
         logger.info("Generating new question based on example and explanation")
@@ -93,69 +98,49 @@ class QuestAiGenerator:
             max_new_tokens=max_new_tokens
         )
         
-        # Parse the generated question into structured format
-        parsed_question = self._parse_generated_question(new_question_text)
+        # Log the new question
+        logger.info(f"Generated new question (first 200 chars): {new_question_text[:200]}...")
         
-        return parsed_question
+        # Return raw outputs without parsing
+        return {
+            "raw_explanation": explanation,
+            "raw_generated_question": new_question_text,
+            "question": "See raw_generated_question for complete output",
+            "options": {},
+            "answer": "",
+            "explanation": "See raw_explanation for complete output"
+        }
 
     def _generate_text(self, prompt: str, temperature: float, max_new_tokens: int) -> str:
         """Helper method to generate text from a prompt."""
+        logger.info(f"Tokenizing prompt of length {len(prompt)}")
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         
+        logger.info(f"Starting generation with temperature={temperature}, max_new_tokens={max_new_tokens}")
         with torch.no_grad():
-            outputs = self.model.generate(
-                inputs.input_ids,
-                attention_mask=inputs.attention_mask,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                do_sample=True,
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
-        
-        generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        # Extract the content after [/INST]
-        return generated_text.split("[/INST]")[-1].strip()
-
-    def _parse_generated_question(self, text: str) -> dict:
-        """
-        Parse the generated question text into a structured format.
-        
-        Args:
-            text: Raw generated text from model
-            
-        Returns:
-            Dict containing question, options, and answer
-        """
-        result = {
-            "question": "",
-            "options": {},
-            "answer": "",
-            "explanation": ""
-        }
-        
-        # Find where the options start and the question ends
-        option_start_match = re.search(r'(?:\n|\s)([A-F])[\.\)]\s', text)
-        if option_start_match:
-            # Extract the question text (everything before the options)
-            result["question"] = text[:option_start_match.start()].strip()
-            options_section = text[option_start_match.start():].strip()
-            
-            # Extract the options
-            option_pattern = re.compile(r'(?:^|\n|\s)([A-F])[\.\)]\s+(.*?)(?=(?:\n|\s)[A-F][\.\)]|$)', re.DOTALL)
-            for match in option_pattern.finditer(options_section):
-                letter, option_text = match.groups()
-                result["options"][letter] = option_text.strip()
-            
-            # Find the correct answer if specified
-            answer_pattern = re.compile(r'(?:correct answer is|the answer is)[:\s]*([A-F])', re.IGNORECASE)
-            answer_match = answer_pattern.search(text)
-            if answer_match:
-                result["answer"] = answer_match.group(1)
+            try:
+                outputs = self.model.generate(
+                    inputs.input_ids,
+                    attention_mask=inputs.attention_mask,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                )
+                logger.info(f"Generation completed. Output shape: {outputs.shape}")
                 
-            # Extract explanation if present
-            explanation_pattern = re.compile(r'(?:explanation:|discussion:|the correct answer is.*?because)', re.IGNORECASE)
-            explanation_match = explanation_pattern.search(text)
-            if explanation_match:
-                result["explanation"] = text[explanation_match.start():].strip()
-        
-        return result
+                generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                logger.info(f"Decoded full response length: {len(generated_text)}")
+                
+                # Extract the content after [/INST]
+                if "[/INST]" in generated_text:
+                    result = generated_text.split("[/INST]")[-1].strip()
+                    logger.info(f"Extracted text after [/INST], length: {len(result)}")
+                    return result
+                else:
+                    logger.warning("No [/INST] tag found in response")
+                    return generated_text
+                
+            except Exception as e:
+                logger.error(f"Error during generation: {e}")
+                return f"Generation error: {str(e)}"
