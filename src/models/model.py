@@ -25,8 +25,8 @@ class MedicalQuestionGenerator:
     def __init__(
         self, 
         model_name: str = "BioMistral/BioMistral-7B", 
-        load_in_4bit: bool = True,
-        load_in_8bit: bool = False,
+        load_in_4bit: bool = False,
+        load_in_8bit: bool = True,
         device: Optional[str] = None,
         use_cache: bool = True,
         cache_dir: Optional[str] = None
@@ -93,7 +93,31 @@ class MedicalQuestionGenerator:
         try:
             # GPU path with quantization options
             if self.device == "cuda":
-                if load_in_4bit:
+                if load_in_8bit:
+                    logger.info("Loading model in 8-bit precision on GPU (optimal for T4)...")
+                    try:
+                        import bitsandbytes as bnb
+                        self.model = AutoModelForCausalLM.from_pretrained(
+                            model_name,
+                            load_in_8bit=True,
+                            device_map="auto",
+                            torch_dtype=torch.float16  # Add explicit torch dtype for better T4 compatibility
+                        )
+                    except ImportError:
+                        logger.warning("bitsandbytes not available for 8-bit quantization. Falling back...")
+                        raise ImportError("bitsandbytes required for 8-bit quantization")
+                    except Exception as e:
+                        logger.warning(f"8-bit loading failed: {e}")
+                        logger.info("Falling back to standard loading...")
+                        
+                        self.model = AutoModelForCausalLM.from_pretrained(
+                            model_name,
+                            torch_dtype=torch.float16,
+                            device_map="auto"
+                        )
+                        logger.info("Model loaded with standard quantization")
+                        
+                elif load_in_4bit:
                     logger.info("Loading model in 4-bit precision on GPU...")
                     try:
                         import bitsandbytes as bnb
@@ -110,23 +134,24 @@ class MedicalQuestionGenerator:
                     except ImportError:
                         logger.warning("bitsandbytes not available for 4-bit quantization. Falling back...")
                         raise ImportError("bitsandbytes required for 4-bit quantization")
+                    except Exception as e:
+                        logger.warning(f"4-bit loading failed: {e}")
+                        logger.info("Falling back to standard loading...")
                         
-                elif load_in_8bit:
-                    logger.info("Loading model in 8-bit precision on GPU...")
-                    try:
-                        import bitsandbytes as bnb
                         self.model = AutoModelForCausalLM.from_pretrained(
                             model_name,
-                            load_in_8bit=True,
+                            torch_dtype=torch.float16,
                             device_map="auto"
                         )
-                    except ImportError:
-                        logger.warning("bitsandbytes not available for 8-bit quantization. Falling back...")
-                        raise ImportError("bitsandbytes required for 8-bit quantization")
+                        logger.info("Model loaded with standard quantization")
                         
                 else:
                     logger.info("Loading model in full precision on GPU...")
-                    self.model = AutoModelForCausalLM.from_pretrained(model_name)
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        model_name, 
+                        torch_dtype=torch.float16,
+                        device_map="auto"
+                    )
                     self.model.to(self.device)
                     
             # CPU path (quantization options limited)
@@ -193,12 +218,18 @@ def test_cpu_model_loading():
     print("Testing model loading on CPU...")
     
     try:
+        # Using a smaller model for testing
+        small_model = "google/flan-t5-small"  # Much smaller than BioMistral
+
         # First run - will create cache
         print("First run - should load model from scratch and cache it")
         generator1 = MedicalQuestionGenerator(
+            model_name=small_model,
             device="cpu", 
             use_cache=True,
-            cache_dir="./test_model_cache"
+            cache_dir="./test_model_cache",
+            load_in_8bit=False,  # Can't use 8-bit on CPU
+            load_in_4bit=False   # Can't use 4-bit on CPU
         )
         
         # Check basic properties
@@ -212,9 +243,12 @@ def test_cpu_model_loading():
         # Second run - should use cache
         print("\nSecond run - should load model from cache")
         generator2 = MedicalQuestionGenerator(
+            model_name=small_model,
             device="cpu", 
             use_cache=True,
-            cache_dir="./test_model_cache"
+            cache_dir="./test_model_cache",
+            load_in_8bit=False,
+            load_in_4bit=False
         )
         
         print("✓ Second model loaded")
@@ -222,8 +256,11 @@ def test_cpu_model_loading():
         # Test disabling cache
         print("\nThird run - with caching disabled")
         generator3 = MedicalQuestionGenerator(
+            model_name=small_model,
             device="cpu", 
-            use_cache=False
+            use_cache=False,
+            load_in_8bit=False,
+            load_in_4bit=False
         )
         
         print("✓ Third model loaded without cache")
