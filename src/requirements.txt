@@ -3,7 +3,7 @@ pandas
 tqdm
 torch>=2.0.0
 transformers>=4.34.0
-accelerate>=0.23.0
+accelerate>=0.3.0
 safetensors>=0.3.2
 sentencepiece
 datasets
@@ -12,4 +12,10 @@ ipython
 # Added dependencies needed for fine_tune.py
 peft>=0.5.0
 wandb
-bitsandbytes>=0.41.0 
+bitsandbytes>=0.41.0
+# Added dependencies for medical accuracy evaluation
+jsonschema
+pathlib
+requests
+scikit-learn
+matplotlib 
