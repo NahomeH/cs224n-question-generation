@@ -495,7 +495,7 @@ class USMLEModelFineTuner:
             collate_fn=default_data_collator
         )
         
-        # Setup optimizer
+        # Setup optimizer: updates model parameters during fine-tuning
         optimizer = torch.optim.AdamW(self.base_model.parameters(), lr=learning_rate)
         
         # Training tracking variables
@@ -527,7 +527,7 @@ class USMLEModelFineTuner:
                 # Move batch to device
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 
-                # Forward pass for language modeling
+                # Forward pass for language modeling: formatting consistency
                 outputs = self.base_model(**batch)
                 lm_loss = outputs.loss
                 
