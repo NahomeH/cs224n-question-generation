@@ -275,6 +275,13 @@ class MedicalAccuracyEvaluator:
                 scores = [s for s in [factual_score, clinical_score, terminology_score] if s > 0]
                 average_score = round(sum(scores) / len(scores), 2) if scores else 0
                 
+                # Log scores for this question
+                logger.info(f"\nQuestion {len(evaluation_results) + 1} Scores:")
+                logger.info(f"  Factual Correctness: {factual_score}/5")
+                logger.info(f"  Clinical Relevance: {clinical_score}/5")
+                logger.info(f"  Terminology Accuracy: {terminology_score}/5")
+                logger.info(f"  Average Score: {average_score}/5")
+                
                 # Create simplified evaluation result with only scores
                 evaluation_result = {
                     "factual_correctness": factual_score,
@@ -471,7 +478,7 @@ def main():
     dataset_path = DEFAULT_DATASET_PATH
     output_dir = DEFAULT_OUTPUT_PATH
     batch_size = 8
-    max_samples = 10  # Set to an integer if you want to evaluate fewer samples
+    max_samples = 300  # Set to an integer if you want to evaluate fewer samples
     seed = 42
     use_gpu = True  # Set to False if you don't want to use GPU
     
