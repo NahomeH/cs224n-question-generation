@@ -93,13 +93,30 @@ class MedicalAccuracyEvaluator:
         )
         
         logger.info(f"Initializing evaluation model: {self.evaluation_model_name}")
-        # Load the evaluation model
-        self.evaluator = pipeline(
-            "text-generation",
-            model=self.evaluation_model_name,
-            device=device,
-            torch_dtype=torch.float16 if device >= 0 else torch.float32
-        )
+        # Load the evaluation model with more careful configuration
+        try:
+            # First load tokenizer separately to configure it properly
+            self.eval_tokenizer = AutoTokenizer.from_pretrained(self.evaluation_model_name)
+            self.eval_tokenizer.pad_token = self.eval_tokenizer.eos_token
+            
+            # Then load model with basic configuration
+            eval_model = AutoModelForCausalLM.from_pretrained(
+                self.evaluation_model_name, 
+                torch_dtype=torch.float16 if device >= 0 else torch.float32
+            )
+            
+            # Create pipeline with configured tokenizer
+            self.evaluator = pipeline(
+                "text-generation",
+                model=eval_model,
+                tokenizer=self.eval_tokenizer,
+                device=device,
+                torch_dtype=torch.float16 if device >= 0 else torch.float32
+            )
+            logger.info(f"Successfully initialized evaluation model")
+        except Exception as e:
+            logger.error(f"Error initializing evaluation model: {str(e)}")
+            raise RuntimeError(f"Failed to initialize evaluation model: {str(e)}")
     
     def _load_dataset(self, dataset_path: str):
         """Load and preprocess the dataset"""
@@ -125,94 +142,163 @@ class MedicalAccuracyEvaluator:
         generated_questions = []
         
         for input_text in tqdm(input_texts, desc="Generating questions"):
-            # Use the input_text directly as the prompt
-            prompt = input_text
-            
-            # Generate the question
-            response = self.generator(
-                prompt,
-                max_new_tokens=250,
-                temperature=0.7,
-                top_p=0.9,
-                repetition_penalty=1.1,
-                do_sample=True
-            )[0]['generated_text']
-            
-            # Extract just the generated question part (remove the prompt)
-            # Since we're using the input_text directly, remove it from the response
-            if len(response) > len(prompt) and response.startswith(prompt):
-                question = response[len(prompt):].strip()
-            else:
-                question = response.strip()
+            try:
+                # Limit input text length to avoid exceeding context window
+                max_input_length = 512  # Safe limit for input text
+                input_text = input_text[:max_input_length]
                 
-            generated_questions.append(question)
-            
+                # Use the input_text directly as the prompt
+                prompt = input_text
+                
+                # Generate the question
+                response = self.generator(
+                    prompt,
+                    max_new_tokens=250,
+                    temperature=0.7,
+                    top_p=0.9,
+                    repetition_penalty=1.1,
+                    do_sample=True
+                )[0]['generated_text']
+                
+                # Extract just the generated question part (remove the prompt)
+                # Since we're using the input_text directly, remove it from the response
+                if len(response) > len(prompt) and response.startswith(prompt):
+                    question = response[len(prompt):].strip()
+                else:
+                    question = response.strip()
+                    
+                generated_questions.append(question)
+            except Exception as e:
+                logger.error(f"Error generating question: {str(e)}")
+                # Add a placeholder question to maintain alignment with input_texts
+                generated_questions.append("Error generating question.")
+                
         return generated_questions
     
     def _evaluate_medical_accuracy(self, input_texts: List[str], generated_questions: List[str]) -> List[Dict[str, Any]]:
         """
         Evaluate the medical accuracy of generated questions using an evaluation model.
-        
-        This uses a medical evaluation prompt that asks the evaluation model to assess:
-        1. Medical factual correctness
-        2. Clinical relevance
-        3. Terminology accuracy
         """
         logger.info("Evaluating medical accuracy of generated questions")
         evaluation_results = []
         
-        # Evaluation prompt template
+        # Even shorter evaluation prompt template to reduce token usage further
         evaluation_prompt_template = """
-        You are a medical expert evaluating the accuracy of USMLE-style medical questions.
+        Evaluate this USMLE question (1-5 scale, 5=best):
         
-        Generated Question:
         {generated_question}
         
-        Please evaluate the medical accuracy of the generated question on a scale of 1-5 (5 being highest) across these dimensions:
-        1. Factual Correctness: Are the medical facts in the question scientifically accurate according to current medical knowledge?
-        2. Clinical Relevance: Is the question clinically appropriate and relevant to medical practice?
-        3. Terminology Accuracy: Are medical terms used correctly and appropriately?
-        
-        Your response must be in JSON format exactly like this:
+        JSON response only:
         {{
-            "factual_correctness": [score 1-5],
-            "clinical_relevance": [score 1-5],
-            "terminology_accuracy": [score 1-5],
-            "average_score": [average of the three scores, rounded to 2 decimal places],
-            "explanation": [brief explanation of your evaluation]
+            "factual_correctness": [1-5],
+            "clinical_relevance": [1-5],
+            "terminology_accuracy": [1-5],
+            "average_score": [avg],
+            "explanation": [brief]
         }}
-        
-        Respond with ONLY the JSON.
         """
         
         for input_text, generated_question in tqdm(zip(input_texts, generated_questions), 
                                                    desc="Evaluating medical accuracy", 
                                                    total=len(input_texts)):
-            
-            # Prepare evaluation prompt
-            evaluation_prompt = evaluation_prompt_template.format(
-                generated_question=generated_question
-            )
-            
-            # Get evaluation from the model
-            evaluation_response = self.evaluator(
-                evaluation_prompt,
-                max_new_tokens=1024,
-                temperature=0.1,  # Low temperature for more deterministic evaluation
-                do_sample=False
-            )[0]['generated_text']
-            
-            # Extract the JSON response
             try:
-                # Find the JSON part of the response
-                start_idx = evaluation_response.find('{')
-                end_idx = evaluation_response.rfind('}') + 1
+                # Skip evaluation if the generation failed
+                if generated_question == "Error generating question.":
+                    evaluation_results.append({
+                        "input_text": input_text,
+                        "generated_question": generated_question,
+                        "evaluation": {
+                            "factual_correctness": 0,
+                            "clinical_relevance": 0,
+                            "terminology_accuracy": 0,
+                            "average_score": 0,
+                            "explanation": "Evaluation skipped due to question generation error"
+                        }
+                    })
+                    continue
                 
-                if start_idx != -1 and end_idx != -1:
-                    json_str = evaluation_response[start_idx:end_idx]
-                    evaluation_result = json.loads(json_str)
-                else:
-                    # If no JSON found, assign default failed values
+                # Limit generated question length to avoid token limit issues
+                max_question_length = 300  # Further reduced for safety
+                truncated_question = generated_question[:max_question_length]
+                
+                # Prepare evaluation prompt
+                evaluation_prompt = evaluation_prompt_template.format(
+                    generated_question=truncated_question
+                )
+                
+                # Manual inference with more control instead of using pipeline directly
+                try:
+                    # First tokenize with careful padding control
+                    model_inputs = self.eval_tokenizer(
+                        evaluation_prompt,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        max_length=512  # Fixed context length
+                    )
+                    
+                    # Move to GPU if available
+                    if torch.cuda.is_available() and self.use_gpu:
+                        model_inputs = {k: v.cuda() for k, v in model_inputs.items()}
+                    
+                    # Generate with more controlled settings
+                    with torch.no_grad():
+                        output_ids = self.evaluator.model.generate(
+                            **model_inputs,
+                            max_new_tokens=384,  # Further reduced to avoid issues
+                            temperature=0.1,
+                            do_sample=False,
+                            pad_token_id=self.eval_tokenizer.eos_token_id,
+                            num_return_sequences=1
+                        )
+                    
+                    # Decode to get response
+                    evaluation_response = self.eval_tokenizer.decode(
+                        output_ids[0], 
+                        skip_special_tokens=True
+                    )
+                except Exception as e:
+                    logger.error(f"Error during model inference: {str(e)}")
+                    evaluation_response = ""
+                
+                # Extract the JSON response
+                try:
+                    # Find the JSON part of the response
+                    start_idx = evaluation_response.find('{')
+                    end_idx = evaluation_response.rfind('}') + 1
+                    
+                    if start_idx != -1 and end_idx != -1:
+                        json_str = evaluation_response[start_idx:end_idx]
+                        evaluation_result = json.loads(json_str)
+                        
+                        # Ensure all required fields are present
+                        required_fields = [
+                            "factual_correctness", "clinical_relevance", 
+                            "terminology_accuracy", "average_score", "explanation"
+                        ]
+                        for field in required_fields:
+                            if field not in evaluation_result:
+                                if field == "average_score" and all(k in evaluation_result for k in required_fields[:3]):
+                                    # Calculate average if missing but other scores are present
+                                    scores = [
+                                        evaluation_result["factual_correctness"],
+                                        evaluation_result["clinical_relevance"],
+                                        evaluation_result["terminology_accuracy"]
+                                    ]
+                                    evaluation_result["average_score"] = round(sum(scores) / 3, 2)
+                                else:
+                                    evaluation_result[field] = 0 if field != "explanation" else "Missing field"
+                    else:
+                        # If no JSON found, assign default failed values
+                        evaluation_result = {
+                            "factual_correctness": 0,
+                            "clinical_relevance": 0,
+                            "terminology_accuracy": 0,
+                            "average_score": 0,
+                            "explanation": "Failed to extract JSON from evaluation response"
+                        }
+                        logger.warning(f"Failed to extract JSON from evaluation response: {evaluation_response}")
+                except json.JSONDecodeError:
                     evaluation_result = {
                         "factual_correctness": 0,
                         "clinical_relevance": 0,
@@ -220,26 +306,32 @@ class MedicalAccuracyEvaluator:
                         "average_score": 0,
                         "explanation": "Failed to parse evaluation response"
                     }
-                    logger.warning(f"Failed to extract JSON from evaluation response: {evaluation_response}")
-            except json.JSONDecodeError:
-                evaluation_result = {
-                    "factual_correctness": 0,
-                    "clinical_relevance": 0,
-                    "terminology_accuracy": 0,
-                    "average_score": 0,
-                    "explanation": "Failed to parse evaluation response"
+                    logger.warning(f"Failed to parse JSON from evaluation response: {evaluation_response}")
+                
+                # Add the input and output to the result
+                result_entry = {
+                    "input_text": input_text,
+                    "generated_question": generated_question,
+                    "evaluation": evaluation_result
                 }
-                logger.warning(f"Failed to parse JSON from evaluation response: {evaluation_response}")
-            
-            # Add the input and output to the result
-            result_entry = {
-                "input_text": input_text,
-                "generated_question": generated_question,
-                "evaluation": evaluation_result
-            }
-            
-            evaluation_results.append(result_entry)
-            
+                
+                evaluation_results.append(result_entry)
+                
+            except Exception as e:
+                logger.error(f"Error evaluating question: {str(e)}")
+                # Add a placeholder evaluation to maintain alignment
+                evaluation_results.append({
+                    "input_text": input_text,
+                    "generated_question": generated_question,
+                    "evaluation": {
+                        "factual_correctness": 0,
+                        "clinical_relevance": 0,
+                        "terminology_accuracy": 0,
+                        "average_score": 0,
+                        "explanation": f"Error during evaluation: {str(e)}"
+                    }
+                })
+                
         return evaluation_results
     
     def evaluate(self, dataset_path: str) -> Dict[str, Any]:
@@ -378,7 +470,7 @@ def main():
     dataset_path = DEFAULT_DATASET_PATH
     output_dir = DEFAULT_OUTPUT_PATH
     batch_size = 8
-    max_samples = None  # Set to an integer if you want to evaluate fewer samples
+    max_samples = 100  # Set to an integer if you want to evaluate fewer samples
     seed = 42
     use_gpu = True  # Set to False if you don't want to use GPU
     
