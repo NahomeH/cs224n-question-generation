@@ -178,11 +178,12 @@ class MedicalAccuracyEvaluator:
     def _evaluate_medical_accuracy(self, input_texts: List[str], generated_questions: List[str]) -> List[Dict[str, Any]]:
         """
         Evaluate the medical accuracy of generated questions using an evaluation model.
+        Only extracts numerical scores without explanations.
         """
         logger.info("Evaluating medical accuracy of generated questions")
         evaluation_results = []
         
-        # Improved prompt with clearer instructions for JSON output
+        # Simplified prompt focused only on numerical scoring
         evaluation_prompt_template = """
         Task: Evaluate a USMLE-style medical question on three criteria.
         
@@ -195,17 +196,13 @@ class MedicalAccuracyEvaluator:
         
         For each criterion, 1=poor, 3=acceptable, 5=excellent.
         
-        IMPORTANT: Your response MUST ONLY contain a valid JSON object in this EXACT format:
+        IMPORTANT: Your response must ONLY contain three numbers in this exact format:
         
-        {{
-            "factual_correctness": 3,
-            "clinical_relevance": 3,
-            "terminology_accuracy": 3,
-            "average_score": 3.0,
-            "explanation": "Brief explanation of your ratings"
-        }}
+        FACTUAL CORRECTNESS: [score]
+        CLINICAL RELEVANCE: [score]
+        TERMINOLOGY ACCURACY: [score]
         
-        ONLY OUTPUT THE JSON OBJECT ABOVE. DO NOT include any text before or after the JSON object.
+        ONLY provide the scores as single numbers from 1-5. NO explanation is needed.
         """
         
         # Process each question
@@ -222,9 +219,9 @@ class MedicalAccuracyEvaluator:
                             "factual_correctness": 0,
                             "clinical_relevance": 0,
                             "terminology_accuracy": 0,
-                            "average_score": 0,
-                            "explanation": "Evaluation skipped due to question generation error"
-                        }
+                            "average_score": 0
+                        },
+                        "method": "skipped"
                     })
                     continue
                 
@@ -237,121 +234,68 @@ class MedicalAccuracyEvaluator:
                     generated_question=truncated_question
                 )
                 
-                # Run multiple attempts to get valid JSON
-                max_attempts = 3
-                got_valid_json = False
+                # Generate with controlled settings
+                model_inputs = self.eval_tokenizer(
+                    evaluation_prompt,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=512
+                )
                 
-                for attempt in range(max_attempts):
-                    try:
-                        # Generate with more controlled settings to ensure proper JSON format
-                        model_inputs = self.eval_tokenizer(
-                            evaluation_prompt,
-                            return_tensors="pt",
-                            padding=True,
-                            truncation=True,
-                            max_length=512
-                        )
-                        
-                        # Move to GPU if available
-                        if torch.cuda.is_available() and self.use_gpu:
-                            model_inputs = {k: v.cuda() for k, v in model_inputs.items()}
-                        
-                        # Generate with more strict parameters
-                        with torch.no_grad():
-                            output_ids = self.evaluator.model.generate(
-                                **model_inputs,
-                                max_new_tokens=384,
-                                temperature=0.1,  # Very low temperature for more deterministic output
-                                do_sample=True,   # Enable sampling with very low temperature
-                                top_p=0.99,       # High precision
-                                num_beams=4,      # Increase beam search for better quality
-                                no_repeat_ngram_size=3,  # Prevent repetition
-                                pad_token_id=self.eval_tokenizer.eos_token_id,
-                                num_return_sequences=1
-                            )
-                        
-                        # Decode to get response
-                        evaluation_response = self.eval_tokenizer.decode(
-                            output_ids[0], 
-                            skip_special_tokens=True
-                        )
-                        
-                        # Improved JSON extraction
-                        # Find the first { and last } to extract the JSON
-                        start_idx = evaluation_response.find('{')
-                        end_idx = evaluation_response.rfind('}') + 1
-                        
-                        if start_idx != -1 and end_idx != -1:
-                            json_str = evaluation_response[start_idx:end_idx]
-                            
-                            # Clean up any potential issues in the JSON string
-                            # Replace any multiple consecutive spaces with a single space
-                            json_str = ' '.join(json_str.split())
-                            
-                            # Fix common JSON formatting issues
-                            json_str = json_str.replace("'", '"')  # Replace single quotes with double quotes
-                            
-                            # Try to parse the JSON
-                            evaluation_result = json.loads(json_str)
-                            
-                            # Ensure all required fields are present
-                            required_fields = [
-                                "factual_correctness", "clinical_relevance", 
-                                "terminology_accuracy", "average_score", "explanation"
-                            ]
-                            
-                            all_fields_present = True
-                            for field in required_fields:
-                                if field not in evaluation_result:
-                                    if field == "average_score" and all(k in evaluation_result for k in required_fields[:3]):
-                                        # Calculate average if missing but other scores are present
-                                        scores = [
-                                            evaluation_result["factual_correctness"],
-                                            evaluation_result["clinical_relevance"],
-                                            evaluation_result["terminology_accuracy"]
-                                        ]
-                                        evaluation_result["average_score"] = round(sum(scores) / 3, 2)
-                                    else:
-                                        all_fields_present = False
-                                        break
-                            
-                            if all_fields_present:
-                                got_valid_json = True
-                                break  # Success! Exit the retry loop
-                        
-                        if attempt < max_attempts - 1 and not got_valid_json:
-                            logger.warning(f"Attempt {attempt+1} failed to extract valid JSON, retrying...")
-                    
-                    except Exception as e:
-                        logger.error(f"Error in evaluation attempt {attempt+1}: {str(e)}")
-                        if attempt < max_attempts - 1:
-                            logger.warning(f"Retrying evaluation...")
+                # Move to GPU if available
+                if torch.cuda.is_available() and self.use_gpu:
+                    model_inputs = {k: v.cuda() for k, v in model_inputs.items()}
                 
-                # If we didn't get valid JSON after all attempts
-                if not got_valid_json:
-                    logger.error(f"Failed to get valid JSON evaluation after {max_attempts} attempts")
-                    # Instead of falling back to heuristic, create a minimal valid result with error explanation
-                    evaluation_result = {
-                        "factual_correctness": 0,
-                        "clinical_relevance": 0,
-                        "terminology_accuracy": 0,
-                        "average_score": 0,
-                        "explanation": "Failed to get valid model evaluation after multiple attempts"
-                    }
+                # Generate with strict parameters - only one attempt
+                with torch.no_grad():
+                    output_ids = self.evaluator.model.generate(
+                        **model_inputs,
+                        max_new_tokens=128,  # Reduced, as we only need scores
+                        temperature=0.1,     # More deterministic for better score extraction
+                        do_sample=False,     # Don't use sampling for more consistent results
+                        num_beams=1,         # Use greedy decoding for simplicity
+                        no_repeat_ngram_size=3,
+                        pad_token_id=self.eval_tokenizer.eos_token_id,
+                        num_return_sequences=1
+                    )
+                
+                # Decode to get response
+                evaluation_response = self.eval_tokenizer.decode(
+                    output_ids[0], 
+                    skip_special_tokens=True
+                )
+                
+                # Parse the evaluation response using regex to extract scores
+                factual_score = self._extract_score(evaluation_response, "FACTUAL CORRECTNESS")
+                clinical_score = self._extract_score(evaluation_response, "CLINICAL RELEVANCE")
+                terminology_score = self._extract_score(evaluation_response, "TERMINOLOGY ACCURACY")
+                
+                # Calculate average score
+                scores = [s for s in [factual_score, clinical_score, terminology_score] if s > 0]
+                average_score = round(sum(scores) / len(scores), 2) if scores else 0
+                
+                # Create simplified evaluation result with only scores
+                evaluation_result = {
+                    "factual_correctness": factual_score,
+                    "clinical_relevance": clinical_score,
+                    "terminology_accuracy": terminology_score,
+                    "average_score": average_score
+                }
                 
                 # Add the input and output to the result
                 result_entry = {
                     "input_text": input_text,
                     "generated_question": generated_question,
                     "evaluation": evaluation_result,
-                    "method": "model" if got_valid_json else "failed_model"
+                    "method": "model"
                 }
                 
                 evaluation_results.append(result_entry)
                 
             except Exception as e:
                 logger.error(f"Error evaluating question: {str(e)}")
-                # Add an error result instead of falling back to heuristic
+                # Add an error result
                 evaluation_results.append({
                     "input_text": input_text,
                     "generated_question": generated_question,
@@ -359,13 +303,48 @@ class MedicalAccuracyEvaluator:
                         "factual_correctness": 0,
                         "clinical_relevance": 0,
                         "terminology_accuracy": 0,
-                        "average_score": 0,
-                        "explanation": f"Evaluation error: {str(e)}"
+                        "average_score": 0
                     },
                     "method": "error"
                 })
                 
         return evaluation_results
+    
+    def _extract_score(self, text: str, category: str) -> int:
+        """Extract numerical score for a specific category from evaluation text"""
+        try:
+            # Look for the category label followed by a number
+            import re
+            pattern = rf"{category}:\s*(\d+)"
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                score = int(match.group(1))
+                # Validate score is in the correct range
+                if 1 <= score <= 5:
+                    return score
+            
+            # If no valid score found, try alternative extraction methods
+            # Look for lines starting with the category
+            lines = text.split('\n')
+            for line in lines:
+                if category.lower() in line.lower():
+                    # Extract any digit in this line
+                    digits = re.findall(r'\d+', line)
+                    if digits and 1 <= int(digits[0]) <= 5:
+                        return int(digits[0])
+                        
+            # If still no score, look for any digit from 1-5 in the text
+            all_digits = re.findall(r'\b[1-5]\b', text)
+            if all_digits:
+                # Use the most frequent digit
+                from collections import Counter
+                most_common = Counter(all_digits).most_common(1)[0][0]
+                return int(most_common)
+                
+            return 0
+        except Exception as e:
+            logger.error(f"Error extracting {category} score: {str(e)}")
+            return 0
     
     def evaluate(self, dataset_path: str) -> Dict[str, Any]:
         """
@@ -452,7 +431,7 @@ class MedicalAccuracyEvaluator:
         with open(metrics_path, 'w') as f:
             json.dump(metrics, f, indent=2)
             
-        # Create a summary report
+        # Create a simple numerical summary report
         report_path = self.output_dir / f"biomistral_evaluation_report_{timestamp}.txt"
         with open(report_path, 'w') as f:
             f.write(f"BioMistral Medical Accuracy Evaluation Report - {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -468,53 +447,15 @@ class MedicalAccuracyEvaluator:
             f.write(f"  - Average Terminology Accuracy: {metrics['terminology_accuracy_avg']}/5\n")
             f.write(f"  - Overall Medical Accuracy: {metrics['overall_accuracy_avg']}/5\n\n")
             
-            # Add some example evaluations (3 good, 3 bad if available)
-            f.write(f"Example Evaluations:\n")
+            # Add numerical summary of all evaluations
+            f.write(f"Score Summary for All Evaluations:\n")
             f.write(f"-----------------\n\n")
+            f.write(f"ID | Factual | Clinical | Terminology | Average\n")
+            f.write(f"---|---------|----------|-------------|--------\n")
             
-            # Filter for successful model evaluations only
-            model_evaluations = [r for r in evaluation_results 
-                               if r.get("method") == "model" and 
-                               r["evaluation"]["average_score"] > 0]
-            
-            if model_evaluations:
-                # Sort by average score
-                sorted_results = sorted(
-                    model_evaluations,
-                    key=lambda x: x["evaluation"]["average_score"],
-                    reverse=True
-                )
-                
-                # Write 3 best examples
-                f.write(f"Top scoring examples:\n")
-                for i, result in enumerate(sorted_results[:3]):
-                    f.write(f"Example {i+1} (Score: {result['evaluation']['average_score']}/5)\n")
-                    f.write(f"Generated Question: {result['generated_question'][:300]}...\n")
-                    f.write(f"Explanation: {result['evaluation']['explanation']}\n\n")
-                
-                # Write 3 worst examples
-                f.write(f"Lowest scoring examples:\n")
-                for i, result in enumerate(sorted_results[-3:]):
-                    f.write(f"Example {i+1} (Score: {result['evaluation']['average_score']}/5)\n")
-                    f.write(f"Generated Question: {result['generated_question'][:300]}...\n")
-                    f.write(f"Explanation: {result['evaluation']['explanation']}\n\n")
-            else:
-                f.write("No successful model evaluations to display as examples.\n")
-                f.write("Please check the evaluation settings and model responses.\n")
-            
-            # Add information about failed evaluations
-            failed_evaluations = [r for r in evaluation_results if r.get("method") != "model"]
-            if failed_evaluations:
-                f.write(f"\nFailed Evaluations Analysis:\n")
-                f.write(f"--------------------------\n\n")
-                f.write(f"Total failed evaluations: {len(failed_evaluations)}\n")
-                
-                # Show a couple of failed evaluation examples
-                f.write(f"\nExample failed evaluations:\n")
-                for i, result in enumerate(failed_evaluations[:2]):
-                    f.write(f"Example {i+1} (Method: {result.get('method', 'unknown')})\n")
-                    f.write(f"Generated Question: {result['generated_question'][:300]}...\n")
-                    f.write(f"Error explanation: {result['evaluation']['explanation']}\n\n")
+            for i, result in enumerate(evaluation_results):
+                eval_data = result["evaluation"]
+                f.write(f"{i+1:<3}|{eval_data.get('factual_correctness', 0):<9}|{eval_data.get('clinical_relevance', 0):<10}|{eval_data.get('terminology_accuracy', 0):<13}|{eval_data.get('average_score', 0):.2f}\n")
         
         logger.info(f"Evaluation results saved to {self.output_dir}")
         logger.info(f"Detailed results: {results_path}")
