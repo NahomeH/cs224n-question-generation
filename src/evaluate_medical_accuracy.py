@@ -93,13 +93,30 @@ class MedicalAccuracyEvaluator:
         )
         
         logger.info(f"Initializing evaluation model: {self.evaluation_model_name}")
-        # Load the evaluation model
-        self.evaluator = pipeline(
-            "text-generation",
-            model=self.evaluation_model_name,
-            device=device,
-            torch_dtype=torch.float16 if device >= 0 else torch.float32
-        )
+        # Load the evaluation model with more careful configuration
+        try:
+            # First load tokenizer separately to configure it properly
+            self.eval_tokenizer = AutoTokenizer.from_pretrained(self.evaluation_model_name)
+            self.eval_tokenizer.pad_token = self.eval_tokenizer.eos_token
+            
+            # Then load model with basic configuration
+            eval_model = AutoModelForCausalLM.from_pretrained(
+                self.evaluation_model_name, 
+                torch_dtype=torch.float16 if device >= 0 else torch.float32
+            )
+            
+            # Create pipeline with configured tokenizer
+            self.evaluator = pipeline(
+                "text-generation",
+                model=eval_model,
+                tokenizer=self.eval_tokenizer,
+                device=device,
+                torch_dtype=torch.float16 if device >= 0 else torch.float32
+            )
+            logger.info(f"Successfully initialized evaluation model")
+        except Exception as e:
+            logger.error(f"Error initializing evaluation model: {str(e)}")
+            raise RuntimeError(f"Failed to initialize evaluation model: {str(e)}")
     
     def _load_dataset(self, dataset_path: str):
         """Load and preprocess the dataset"""
@@ -125,122 +142,216 @@ class MedicalAccuracyEvaluator:
         generated_questions = []
         
         for input_text in tqdm(input_texts, desc="Generating questions"):
-            # Use the input_text directly as the prompt
-            prompt = input_text
-            
-            # Generate the question
-            response = self.generator(
-                prompt,
-                max_new_tokens=250,
-                temperature=0.7,
-                top_p=0.9,
-                repetition_penalty=1.1,
-                do_sample=True
-            )[0]['generated_text']
-            
-            # Extract just the generated question part (remove the prompt)
-            # Since we're using the input_text directly, remove it from the response
-            if len(response) > len(prompt) and response.startswith(prompt):
-                question = response[len(prompt):].strip()
-            else:
-                question = response.strip()
+            try:
+                # Limit input text length to avoid exceeding context window
+                max_input_length = 512  # Safe limit for input text
+                input_text = input_text[:max_input_length]
                 
-            generated_questions.append(question)
-            
+                # Use the input_text directly as the prompt
+                prompt = input_text
+                
+                # Generate the question
+                response = self.generator(
+                    prompt,
+                    max_new_tokens=250,
+                    temperature=0.7,
+                    top_p=0.9,
+                    repetition_penalty=1.1,
+                    do_sample=True
+                )[0]['generated_text']
+                
+                # Extract just the generated question part (remove the prompt)
+                # Since we're using the input_text directly, remove it from the response
+                if len(response) > len(prompt) and response.startswith(prompt):
+                    question = response[len(prompt):].strip()
+                else:
+                    question = response.strip()
+                    
+                generated_questions.append(question)
+            except Exception as e:
+                logger.error(f"Error generating question: {str(e)}")
+                # Add a placeholder question to maintain alignment with input_texts
+                generated_questions.append("Error generating question.")
+                
         return generated_questions
     
     def _evaluate_medical_accuracy(self, input_texts: List[str], generated_questions: List[str]) -> List[Dict[str, Any]]:
         """
         Evaluate the medical accuracy of generated questions using an evaluation model.
-        
-        This uses a medical evaluation prompt that asks the evaluation model to assess:
-        1. Medical factual correctness
-        2. Clinical relevance
-        3. Terminology accuracy
+        Only extracts numerical scores without explanations.
         """
         logger.info("Evaluating medical accuracy of generated questions")
         evaluation_results = []
         
-        # Evaluation prompt template
+        # Simplified prompt focused only on numerical scoring
         evaluation_prompt_template = """
-        You are a medical expert evaluating the accuracy of USMLE-style medical questions.
+        Task: Evaluate a USMLE-style medical question on three criteria.
         
-        Generated Question:
-        {generated_question}
+        Question to evaluate: {generated_question}
         
-        Please evaluate the medical accuracy of the generated question on a scale of 1-5 (5 being highest) across these dimensions:
-        1. Factual Correctness: Are the medical facts in the question scientifically accurate according to current medical knowledge?
-        2. Clinical Relevance: Is the question clinically appropriate and relevant to medical practice?
-        3. Terminology Accuracy: Are medical terms used correctly and appropriately?
+        Evaluation criteria:
+        1. Factual correctness (1-5 scale): Are medical facts accurate and scientifically sound?
+        2. Clinical relevance (1-5 scale): Is the question relevant to clinical practice and medical knowledge?
+        3. Terminology accuracy (1-5 scale): Is medical terminology used correctly and appropriately?
         
-        Your response must be in JSON format exactly like this:
-        {{
-            "factual_correctness": [score 1-5],
-            "clinical_relevance": [score 1-5],
-            "terminology_accuracy": [score 1-5],
-            "average_score": [average of the three scores, rounded to 2 decimal places],
-            "explanation": [brief explanation of your evaluation]
-        }}
+        For each criterion, 1=poor, 3=acceptable, 5=excellent.
         
-        Respond with ONLY the JSON.
+        IMPORTANT: Your response must ONLY contain three numbers in this exact format:
+        
+        FACTUAL CORRECTNESS: [score]
+        CLINICAL RELEVANCE: [score]
+        TERMINOLOGY ACCURACY: [score]
+        
+        ONLY provide the scores as single numbers from 1-5. NO explanation is needed.
         """
         
+        # Process each question
         for input_text, generated_question in tqdm(zip(input_texts, generated_questions), 
                                                    desc="Evaluating medical accuracy", 
                                                    total=len(input_texts)):
-            
-            # Prepare evaluation prompt
-            evaluation_prompt = evaluation_prompt_template.format(
-                generated_question=generated_question
-            )
-            
-            # Get evaluation from the model
-            evaluation_response = self.evaluator(
-                evaluation_prompt,
-                max_new_tokens=1024,
-                temperature=0.1,  # Low temperature for more deterministic evaluation
-                do_sample=False
-            )[0]['generated_text']
-            
-            # Extract the JSON response
             try:
-                # Find the JSON part of the response
-                start_idx = evaluation_response.find('{')
-                end_idx = evaluation_response.rfind('}') + 1
+                # Skip evaluation if the generation failed
+                if generated_question == "Error generating question.":
+                    evaluation_results.append({
+                        "input_text": input_text,
+                        "generated_question": generated_question,
+                        "evaluation": {
+                            "factual_correctness": 0,
+                            "clinical_relevance": 0,
+                            "terminology_accuracy": 0,
+                            "average_score": 0
+                        },
+                        "method": "skipped"
+                    })
+                    continue
                 
-                if start_idx != -1 and end_idx != -1:
-                    json_str = evaluation_response[start_idx:end_idx]
-                    evaluation_result = json.loads(json_str)
-                else:
-                    # If no JSON found, assign default failed values
-                    evaluation_result = {
+                # Limit generated question length to avoid token limit issues
+                max_question_length = 300
+                truncated_question = generated_question[:max_question_length]
+                
+                # Prepare evaluation prompt
+                evaluation_prompt = evaluation_prompt_template.format(
+                    generated_question=truncated_question
+                )
+                
+                # Generate with controlled settings
+                model_inputs = self.eval_tokenizer(
+                    evaluation_prompt,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=512
+                )
+                
+                # Move to GPU if available
+                if torch.cuda.is_available() and self.use_gpu:
+                    model_inputs = {k: v.cuda() for k, v in model_inputs.items()}
+                
+                # Generate with strict parameters - only one attempt
+                with torch.no_grad():
+                    output_ids = self.evaluator.model.generate(
+                        **model_inputs,
+                        max_new_tokens=128,  # Reduced, as we only need scores
+                        temperature=0.1,     # More deterministic for better score extraction
+                        do_sample=False,     # Don't use sampling for more consistent results
+                        num_beams=1,         # Use greedy decoding for simplicity
+                        no_repeat_ngram_size=3,
+                        pad_token_id=self.eval_tokenizer.eos_token_id,
+                        num_return_sequences=1
+                    )
+                
+                # Decode to get response
+                evaluation_response = self.eval_tokenizer.decode(
+                    output_ids[0], 
+                    skip_special_tokens=True
+                )
+                
+                # Parse the evaluation response using regex to extract scores
+                factual_score = self._extract_score(evaluation_response, "FACTUAL CORRECTNESS")
+                clinical_score = self._extract_score(evaluation_response, "CLINICAL RELEVANCE")
+                terminology_score = self._extract_score(evaluation_response, "TERMINOLOGY ACCURACY")
+                
+                # Calculate average score
+                scores = [s for s in [factual_score, clinical_score, terminology_score] if s > 0]
+                average_score = round(sum(scores) / len(scores), 2) if scores else 0
+                
+                # Log scores for this question
+                logger.info(f"\nQuestion {len(evaluation_results) + 1} Scores:")
+                logger.info(f"  Factual Correctness: {factual_score}/5")
+                logger.info(f"  Clinical Relevance: {clinical_score}/5")
+                logger.info(f"  Terminology Accuracy: {terminology_score}/5")
+                logger.info(f"  Average Score: {average_score}/5")
+                
+                # Create simplified evaluation result with only scores
+                evaluation_result = {
+                    "factual_correctness": factual_score,
+                    "clinical_relevance": clinical_score,
+                    "terminology_accuracy": terminology_score,
+                    "average_score": average_score
+                }
+                
+                # Add the input and output to the result
+                result_entry = {
+                    "input_text": input_text,
+                    "generated_question": generated_question,
+                    "evaluation": evaluation_result,
+                    "method": "model"
+                }
+                
+                evaluation_results.append(result_entry)
+                
+            except Exception as e:
+                logger.error(f"Error evaluating question: {str(e)}")
+                # Add an error result
+                evaluation_results.append({
+                    "input_text": input_text,
+                    "generated_question": generated_question,
+                    "evaluation": {
                         "factual_correctness": 0,
                         "clinical_relevance": 0,
                         "terminology_accuracy": 0,
-                        "average_score": 0,
-                        "explanation": "Failed to parse evaluation response"
-                    }
-                    logger.warning(f"Failed to extract JSON from evaluation response: {evaluation_response}")
-            except json.JSONDecodeError:
-                evaluation_result = {
-                    "factual_correctness": 0,
-                    "clinical_relevance": 0,
-                    "terminology_accuracy": 0,
-                    "average_score": 0,
-                    "explanation": "Failed to parse evaluation response"
-                }
-                logger.warning(f"Failed to parse JSON from evaluation response: {evaluation_response}")
-            
-            # Add the input and output to the result
-            result_entry = {
-                "input_text": input_text,
-                "generated_question": generated_question,
-                "evaluation": evaluation_result
-            }
-            
-            evaluation_results.append(result_entry)
-            
+                        "average_score": 0
+                    },
+                    "method": "error"
+                })
+                
         return evaluation_results
+    
+    def _extract_score(self, text: str, category: str) -> int:
+        """Extract numerical score for a specific category from evaluation text"""
+        try:
+            # Look for the category label followed by a number
+            import re
+            pattern = rf"{category}:\s*(\d+)"
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                score = int(match.group(1))
+                # Validate score is in the correct range
+                if 1 <= score <= 5:
+                    return score
+            
+            # If no valid score found, try alternative extraction methods
+            # Look for lines starting with the category
+            lines = text.split('\n')
+            for line in lines:
+                if category.lower() in line.lower():
+                    # Extract any digit in this line
+                    digits = re.findall(r'\d+', line)
+                    if digits and 1 <= int(digits[0]) <= 5:
+                        return int(digits[0])
+                        
+            # If still no score, look for any digit from 1-5 in the text
+            all_digits = re.findall(r'\b[1-5]\b', text)
+            if all_digits:
+                # Use the most frequent digit
+                from collections import Counter
+                most_common = Counter(all_digits).most_common(1)[0][0]
+                return int(most_common)
+                
+            return 0
+        except Exception as e:
+            logger.error(f"Error extracting {category} score: {str(e)}")
+            return 0
     
     def evaluate(self, dataset_path: str) -> Dict[str, Any]:
         """
@@ -280,28 +391,31 @@ class MedicalAccuracyEvaluator:
             "terminology_accuracy_avg": 0,
             "overall_accuracy_avg": 0,
             "total_evaluated": len(evaluation_results),
-            "success_rate": 0  # Percentage of evaluations that completed successfully
+            "successful_evaluations": 0,
+            "failed_evaluations": 0
         }
-        
-        successful_evaluations = 0
         
         for result in evaluation_results:
             eval_data = result["evaluation"]
-            if eval_data["factual_correctness"] > 0:  # Check if evaluation was successful
+            method = result.get("method", "unknown")
+            
+            if method == "model" and eval_data["factual_correctness"] > 0:
                 metrics["factual_correctness_avg"] += eval_data["factual_correctness"]
                 metrics["clinical_relevance_avg"] += eval_data["clinical_relevance"]
                 metrics["terminology_accuracy_avg"] += eval_data["terminology_accuracy"]
                 metrics["overall_accuracy_avg"] += eval_data["average_score"]
-                successful_evaluations += 1
+                metrics["successful_evaluations"] += 1
+            else:
+                metrics["failed_evaluations"] += 1
         
-        # Compute averages
-        if successful_evaluations > 0:
-            metrics["factual_correctness_avg"] /= successful_evaluations
-            metrics["clinical_relevance_avg"] /= successful_evaluations
-            metrics["terminology_accuracy_avg"] /= successful_evaluations
-            metrics["overall_accuracy_avg"] /= successful_evaluations
+        # Compute averages (only for successful model evaluations)
+        if metrics["successful_evaluations"] > 0:
+            metrics["factual_correctness_avg"] /= metrics["successful_evaluations"]
+            metrics["clinical_relevance_avg"] /= metrics["successful_evaluations"]
+            metrics["terminology_accuracy_avg"] /= metrics["successful_evaluations"]
+            metrics["overall_accuracy_avg"] /= metrics["successful_evaluations"]
             
-        metrics["success_rate"] = (successful_evaluations / len(evaluation_results)) * 100 if len(evaluation_results) > 0 else 0
+        metrics["success_rate"] = (metrics["successful_evaluations"] / len(evaluation_results)) * 100 if len(evaluation_results) > 0 else 0
         
         # Round all metrics to 2 decimal places
         for key in metrics:
@@ -324,7 +438,7 @@ class MedicalAccuracyEvaluator:
         with open(metrics_path, 'w') as f:
             json.dump(metrics, f, indent=2)
             
-        # Create a summary report
+        # Create a simple numerical summary report
         report_path = self.output_dir / f"biomistral_evaluation_report_{timestamp}.txt"
         with open(report_path, 'w') as f:
             f.write(f"BioMistral Medical Accuracy Evaluation Report - {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -332,37 +446,23 @@ class MedicalAccuracyEvaluator:
             f.write(f"Generator model evaluated: {self.generator_model_name}\n")
             f.write(f"Evaluation model: {self.evaluation_model_name}\n")
             f.write(f"Total samples evaluated: {metrics['total_evaluated']}\n")
-            f.write(f"Successful evaluations: {metrics['success_rate']}%\n\n")
+            f.write(f"Successful model evaluations: {metrics['successful_evaluations']} ({metrics['success_rate']}%)\n")
+            f.write(f"Failed evaluations: {metrics['failed_evaluations']}\n\n")
             f.write(f"Evaluation Metrics:\n")
             f.write(f"  - Average Factual Correctness: {metrics['factual_correctness_avg']}/5\n")
             f.write(f"  - Average Clinical Relevance: {metrics['clinical_relevance_avg']}/5\n")
             f.write(f"  - Average Terminology Accuracy: {metrics['terminology_accuracy_avg']}/5\n")
             f.write(f"  - Overall Medical Accuracy: {metrics['overall_accuracy_avg']}/5\n\n")
             
-            # Add some example evaluations (3 good, 3 bad if available)
-            f.write(f"Example Evaluations:\n")
+            # Add numerical summary of all evaluations
+            f.write(f"Score Summary for All Evaluations:\n")
             f.write(f"-----------------\n\n")
+            f.write(f"ID | Factual | Clinical | Terminology | Average\n")
+            f.write(f"---|---------|----------|-------------|--------\n")
             
-            # Sort by average score
-            sorted_results = sorted(
-                [r for r in evaluation_results if r["evaluation"]["average_score"] > 0],
-                key=lambda x: x["evaluation"]["average_score"],
-                reverse=True
-            )
-            
-            # Write 3 best examples
-            f.write(f"Top scoring examples:\n")
-            for i, result in enumerate(sorted_results[:3]):
-                f.write(f"Example {i+1} (Score: {result['evaluation']['average_score']}/5)\n")
-                f.write(f"Generated Question: {result['generated_question'][:300]}...\n")
-                f.write(f"Explanation: {result['evaluation']['explanation']}\n\n")
-            
-            # Write 3 worst examples
-            f.write(f"Lowest scoring examples:\n")
-            for i, result in enumerate(sorted_results[-3:]):
-                f.write(f"Example {i+1} (Score: {result['evaluation']['average_score']}/5)\n")
-                f.write(f"Generated Question: {result['generated_question'][:300]}...\n")
-                f.write(f"Explanation: {result['evaluation']['explanation']}\n\n")
+            for i, result in enumerate(evaluation_results):
+                eval_data = result["evaluation"]
+                f.write(f"{i+1:<3}|{eval_data.get('factual_correctness', 0):<9}|{eval_data.get('clinical_relevance', 0):<10}|{eval_data.get('terminology_accuracy', 0):<13}|{eval_data.get('average_score', 0):.2f}\n")
         
         logger.info(f"Evaluation results saved to {self.output_dir}")
         logger.info(f"Detailed results: {results_path}")
@@ -378,7 +478,7 @@ def main():
     dataset_path = DEFAULT_DATASET_PATH
     output_dir = DEFAULT_OUTPUT_PATH
     batch_size = 8
-    max_samples = None  # Set to an integer if you want to evaluate fewer samples
+    max_samples = 300  # Set to an integer if you want to evaluate fewer samples
     seed = 42
     use_gpu = True  # Set to False if you don't want to use GPU
     
@@ -401,7 +501,8 @@ def main():
     print(f"  - Generator model: {generator_model_name}")
     print(f"  - Evaluation model: {evaluation_model_name}")
     print(f"  - Total samples evaluated: {metrics['total_evaluated']}")
-    print(f"  - Successful evaluations: {metrics['success_rate']}%")
+    print(f"  - Successful model evaluations: {metrics['successful_evaluations']} ({metrics['success_rate']}%)")
+    print(f"  - Failed evaluations: {metrics['failed_evaluations']}")
     print(f"  - Overall Medical Accuracy: {metrics['overall_accuracy_avg']}/5")
     print(f"    - Factual Correctness: {metrics['factual_correctness_avg']}/5")
     print(f"    - Clinical Relevance: {metrics['clinical_relevance_avg']}/5")
